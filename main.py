@@ -5,7 +5,6 @@ import urllib.parse
 import asyncio
 import requests
 import httpx
-from deep_translator import GoogleTranslator
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -27,13 +26,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# عميل مستقل لتفادي تعارض متغيرات النظام
+# استخدام عميل مستقل لتفادي مشاكل البروكسي الداخلية
 client = Groq(
     api_key=GROQ_API_KEY,
     http_client=httpx.Client()
 )
 
-# تعليمات النظام لتعريف هوية البوت
+# تعليمات تعريف هوية البوت
 SYSTEM_PROMPT = {
     "role": "system",
     "content": (
@@ -45,11 +44,11 @@ SYSTEM_PROMPT = {
     )
 }
 
-# ذاكرة RAM لحفظ سياق المحادثة لكل مستخدم
+# ذاكرة لحفظ سياق المحادثة لكل مستخدم
 user_histories: dict[int, list[dict]] = {}
 MAX_HISTORY_MESSAGES = 20
 
-# الكلمات الدلالية لطلب الصور تلقائياً
+# الكلمات المفتاحية لاكتشاف طلب الصور تلقائياً
 IMAGE_KEYWORDS_PATTERN = (
     r"^(صمم لي صورة|صمملي صورة|صمم صورة|صمم لي|صمملي|"
     r"ارسم لي صورة|ارسملي صورة|ارسم صورة|ارسم لي|ارسملي|ارسم|"
@@ -63,11 +62,12 @@ WELCOME_MESSAGE = (
     "أنا بوت ذكاء صناعي AI PRO JOUD جاهز أساعدك وأحكي معك بأي موضوع.\n\n"
     "✨ مميزات البوت:\n"
     "• محادثة ذكية والرد على أسئلتك ورسائلك\n"
-    "• توليد صور فائقة الدقة بمجرد كتابة (ارسم لي، صمم لي، انشئ صورة...)\n"
+    "• توليد صور فائقة الدقة عبر الذكاء الاصطناعي\n"
+    "• إمكانية طلب الصور مباشرة (مثل: صمم صورة، ارسم لي...)\n"
     "• حفظ سياق المحادثة وإمكانية مسحها بأي وقت\n\n"
     "📌 الأوامر المتاحة:\n"
     "• اكتبلي أي رسالة وبرد عليك مباشرة\n"
-    "• ارسم لي قطة تلبس نظارة — لتوليد صورة تلقائياً\n"
+    "• ارسم لي قطة في الفضاء — لتوليد صورة تلقائياً\n"
     "• /image وصف الصورة — الطريقة المباشرة لتوليد الصور\n"
     "• /reset — لمسح المحادثة والبدء من جديد\n\n"
     "— — — — — — — — — —\n"
@@ -77,21 +77,28 @@ WELCOME_MESSAGE = (
 
 
 async def send_generated_image(chat_id: int, prompt_text: str, context: ContextTypes.DEFAULT_TYPE):
-    """توليد صور بدقة عالية عبر محرك Flux وترجمة الوصف تلقائياً"""
+    """توليد صور بدقة عالية عبر محرك Flux مع ترجمة مباشرة ومجانية"""
     await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
 
+    translated_prompt = prompt_text
+    # ترجمة مجانية ومباشرة وسريعة تتفادى حظر خوادم غوغل
     try:
-        translated_prompt = GoogleTranslator(source="auto", target="en").translate(prompt_text)
-        logger.info(f"Original: {prompt_text} -> Translated: {translated_prompt}")
+        url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(prompt_text)}&langpair=ar|en"
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            res_text = data.get("responseData", {}).get("translatedText")
+            if res_text and not res_text.lower().startswith("error"):
+                translated_prompt = res_text
+                logger.info(f"Translated successfully: {translated_prompt}")
     except Exception as e:
         logger.error(f"Translation error: {e}")
-        translated_prompt = prompt_text
 
-    # تحسين النص الموجه للمحرك للحصول على تفاصيل واقعية وسينمائية
+    # تحسين النص لنموذج الصور ليعطي جودة سينمائية خالية من التشوهات
     enhanced_prompt = f"{translated_prompt}, highly detailed, cinematic lighting, photorealistic, 8k resolution, masterpiece"
     encoded_prompt = urllib.parse.quote(enhanced_prompt)
 
-    # استخدام نموذج Flux بدقة 1024x1024 وبدون علامات مائية
+    # استخدام نموذج Flux بدقة 1024x1024 وبدون علامة مائية
     image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux&width=1024&height=1024&nologo=true"
 
     try:
@@ -118,7 +125,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_text = update.message.text.strip()
 
-    # التحقق التلقائي إذا كانت الرسالة طلباً لتوليد صورة
+    # التحقق التلقائي إذا كانت الرسالة تبدأ بكلمات طلب تصميم أو رسم صورة
     match = re.match(IMAGE_KEYWORDS_PATTERN, user_text, re.IGNORECASE)
     if match:
         extracted_prompt = user_text[match.end():].strip(" :,-")
@@ -129,7 +136,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("حدد وصف الصورة بعد طلبك، مثلاً:\nارسم لي قطة في الفضاء")
             return
 
-    # استكمال المحادثة الذكية عبر Groq
+    # المحادثة الذكية عبر Groq
     history = user_histories.setdefault(chat_id, [])
     history.append({"role": "user", "content": user_text})
     history = history[-MAX_HISTORY_MESSAGES:]
