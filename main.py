@@ -2,6 +2,7 @@ import os
 import logging
 import urllib.parse
 import requests
+import httpx
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -15,7 +16,8 @@ from groq import Groq
 # ---------- الإعدادات ----------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-MODEL_NAME = "openai/gpt-oss-120b"  # نموذج مجاني عبر Groq، دقة أعلى من Llama
+GROQ_PROXY = os.environ.get("GROQ_PROXY")  # اختياري: إذا كان لديك رابط بروكسي تضعه في Environment Variables
+MODEL_NAME = "openai/gpt-oss-120b"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -23,9 +25,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-client = Groq(api_key=GROQ_API_KEY)
+# إعداد عميل Groq مع دعم البروكسي الصحيح
+if GROQ_PROXY:
+    http_client = httpx.Client(proxy=GROQ_PROXY)
+    client = Groq(api_key=GROQ_API_KEY, http_client=http_client)
+else:
+    client = Groq(api_key=GROQ_API_KEY)
 
-# ذاكرة بسيطة بالـ RAM لكل مستخدم (تنمسح إذا البوت أعاد التشغيل)
+# ذاكرة بسيطة بالـ RAM لكل مستخدم
 user_histories: dict[int, list[dict]] = {}
 MAX_HISTORY_MESSAGES = 20
 
@@ -54,7 +61,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_histories[update.effective_chat.id] = []
-    await update.message.reply_text("تم مسح المحادثة، بلاش من جديد \U0001F504")
+    await update.message.reply_text("تم مسح المحادثة، بلاش من جديد 🔄")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -125,7 +132,6 @@ def main():
     external_url = os.environ.get("RENDER_EXTERNAL_URL")
 
     if external_url:
-        # وضع Webhook (يشتغل على Render كـ Web Service)
         logger.info("Bot starting in webhook mode...")
         app.run_webhook(
             listen="0.0.0.0",
@@ -134,7 +140,6 @@ def main():
             webhook_url=f"{external_url}/{TELEGRAM_TOKEN}",
         )
     else:
-        # وضع Polling (للتشغيل المحلي فقط)
         logger.info("Bot starting in polling mode (local)...")
         app.run_polling()
 
