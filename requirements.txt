@@ -2,3 +2,4 @@ python-telegram-bot[webhooks]
 groq
 httpx
 requests
+deep-translator
