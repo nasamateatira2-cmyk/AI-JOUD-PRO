@@ -1,8 +1,10 @@
 import os
 import logging
 import urllib.parse
+import asyncio
 import requests
 import httpx
+from deep_translator import GoogleTranslator
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -13,7 +15,7 @@ from telegram.ext import (
 )
 from groq import Groq
 
-# ---------- الإعدادات ----------
+# ---------- الإعدادات والمتغيرات ----------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 MODEL_NAME = "openai/gpt-oss-120b"
@@ -24,23 +26,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# استخدام عميل httpx صريح ومخصص لمنع Groq من استدعاء المعامل 'proxies' المتعارض
+# استخدام عميل httpx مستقل لتفادي تعارض متغيرات النظام القديمة
 client = Groq(
     api_key=GROQ_API_KEY,
     http_client=httpx.Client()
 )
 
-# ذاكرة بسيطة بالـ RAM لكل مستخدم (تنمسح إذا البوت أعاد التشغيل)
+# تعليمات النظام لتعريف هوية البوت
+SYSTEM_PROMPT = {
+    "role": "system",
+    "content": (
+        "أنت مساعد ذكاء اصطناعي اسمك AI PRO JOUD. "
+        "تم تطويرك وبرمجتك بواسطة أبو الجود. "
+        "إذا سألك أحد من أنت أو من طورك، عرّف عن نفسك فوراً بأنك AI PRO JOUD الذي طوّره أبو الجود، "
+        "ثم اشرح ميزاتك باختصار: مساعد ذكي للإجابة عن الاستفسارات، المحادثة وحفظ السياق، وتوليد الصور من الوصف النصي. "
+        "لا تذكر أبداً أنك ChatGPT أو تابع لـ OpenAI."
+    )
+}
+
+# ذاكرة بالـ RAM لحفظ سياق المحادثة لكل مستخدم
 user_histories: dict[int, list[dict]] = {}
 MAX_HISTORY_MESSAGES = 20
 
-
 WELCOME_MESSAGE = (
     "🌟 أهلاً وسهلاً فيك! 🌟\n\n"
-    "أنا بوت ذكاء صناعي جاهز أساعدك وأحكي معك بأي موضوع.\n\n"
+    "أنا بوت ذكاء صناعي AI PRO JOUD جاهز أساعدك وأحكي معك بأي موضوع.\n\n"
     "✨ مميزات البوت:\n"
     "• محادثة ذكية والرد على أسئلتك ورسائلك\n"
-    "• توليد صور من وصف نصي\n"
+    "• توليد صور من وصف نصي مع ترجمة تلقائية\n"
     "• حفظ سياق المحادثة وإمكانية مسحها بأي وقت\n\n"
     "📌 الأوامر المتاحة:\n"
     "• اكتبلي أي رسالة وبرد عليك\n"
@@ -73,10 +86,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     try:
+        # إرسال تعليمات النظام مع سجل المحادثة دائماً
+        messages_to_send = [SYSTEM_PROMPT] + history
+
         response = client.chat.completions.create(
             model=MODEL_NAME,
             max_tokens=1000,
-            messages=history,
+            messages=messages_to_send,
         )
         reply_text = response.choices[0].message.content
     except Exception as e:
@@ -90,8 +106,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    prompt = " ".join(context.args)
-    if not prompt:
+    user_prompt = " ".join(context.args)
+    if not user_prompt:
         await update.message.reply_text(
             "اكتب وصف الصورة بعد الأمر، مثلاً:\n/image قطة تلبس نظارة شمس"
         )
@@ -101,13 +117,22 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=update.effective_chat.id, action="upload_photo"
     )
 
-    encoded_prompt = urllib.parse.quote(prompt)
+    # ترجمة الوصف العربي تلقائياً إلى الإنجليزية عبر Google Translate
+    try:
+        translated_prompt = GoogleTranslator(source="auto", target="en").translate(user_prompt)
+        logger.info(f"Original prompt: {user_prompt} -> Translated: {translated_prompt}")
+    except Exception as e:
+        logger.error(f"Translation error: {e}")
+        translated_prompt = user_prompt
+
+    encoded_prompt = urllib.parse.quote(translated_prompt)
     image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
 
     try:
         resp = requests.get(image_url, timeout=60)
         resp.raise_for_status()
-        await update.message.reply_photo(photo=resp.content, caption=prompt)
+        caption_text = f"🎨 الوصف: {user_prompt}\n🔤 الترجمة: {translated_prompt}"
+        await update.message.reply_photo(photo=resp.content, caption=caption_text)
     except Exception as e:
         logger.error(f"Image generation error: {e}")
         await update.message.reply_text("ما قدرت أولد الصورة، جرب كمان مرة 🙏")
