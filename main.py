@@ -16,7 +16,6 @@ from groq import Groq
 # ---------- الإعدادات ----------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_PROXY = os.environ.get("GROQ_PROXY")  # اختياري: إذا كان لديك رابط بروكسي تضعه في Environment Variables
 MODEL_NAME = "openai/gpt-oss-120b"
 
 logging.basicConfig(
@@ -25,14 +24,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# إعداد عميل Groq مع دعم البروكسي الصحيح
-if GROQ_PROXY:
-    http_client = httpx.Client(proxy=GROQ_PROXY)
-    client = Groq(api_key=GROQ_API_KEY, http_client=http_client)
-else:
-    client = Groq(api_key=GROQ_API_KEY)
+# استخدام عميل httpx صريح ومخصص لمنع Groq من استدعاء المعامل 'proxies' المتعارض
+client = Groq(
+    api_key=GROQ_API_KEY,
+    http_client=httpx.Client()
+)
 
-# ذاكرة بسيطة بالـ RAM لكل مستخدم
+# ذاكرة بسيطة بالـ RAM لكل مستخدم (تنمسح إذا البوت أعاد التشغيل)
 user_histories: dict[int, list[dict]] = {}
 MAX_HISTORY_MESSAGES = 20
 
