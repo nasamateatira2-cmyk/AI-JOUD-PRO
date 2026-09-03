@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 import urllib.parse
 import asyncio
@@ -26,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# استخدام عميل httpx مستقل لتفادي تعارض متغيرات النظام القديمة
+# استخدام عميل httpx مستقل لتفادي تعارض متغيرات النظام
 client = Groq(
     api_key=GROQ_API_KEY,
     http_client=httpx.Client()
@@ -48,21 +49,55 @@ SYSTEM_PROMPT = {
 user_histories: dict[int, list[dict]] = {}
 MAX_HISTORY_MESSAGES = 20
 
+# الكلمات الدلالية لطلب الصور
+IMAGE_KEYWORDS_PATTERN = (
+    r"^(صمم لي صورة|صمملي صورة|صمم صورة|صمم لي|صمملي|"
+    r"ارسم لي صورة|ارسملي صورة|ارسم صورة|ارسم لي|ارسملي|ارسم|"
+    r"انشئ صورة|أنشئ صورة|انشئ لي صورة|أنشئ لي صورة|انشئ لي|أنشئ لي|"
+    r"ولد صورة|ولّد صورة|ولد لي صورة|ولّد لي صورة|"
+    r"اصنع لي صورة|اصنع صورة|اعملي صورة|اعمل لي صورة|سويلي صورة|ساوي صورة)"
+)
+
 WELCOME_MESSAGE = (
     "🌟 أهلاً وسهلاً فيك! 🌟\n\n"
     "أنا بوت ذكاء صناعي AI PRO JOUD جاهز أساعدك وأحكي معك بأي موضوع.\n\n"
     "✨ مميزات البوت:\n"
     "• محادثة ذكية والرد على أسئلتك ورسائلك\n"
-    "• توليد صور من وصف نصي مع ترجمة تلقائية\n"
+    "• توليد صور مباشرة بمجرد كتابة (ارسم لي، صمم لي، انشئ صورة...)\n"
     "• حفظ سياق المحادثة وإمكانية مسحها بأي وقت\n\n"
     "📌 الأوامر المتاحة:\n"
     "• اكتبلي أي رسالة وبرد عليك\n"
-    "• /image وصف الصورة — لتوليد صورة\n"
+    "• ارسم لي قطة تلبس نظارة — لتوليد صورة تلقائياً\n"
+    "• /image وصف الصورة — الطريقة التقليدية لتوليد الصور\n"
     "• /reset — لمسح المحادثة والبدء من جديد\n\n"
     "— — — — — — — — — —\n"
     "تم تطوير هذا البوت بشكل رسمي بواسطة أبو الجود\n"
     "جميع الحقوق محفوظة © 2026 أبو الجود"
 )
+
+
+async def send_generated_image(chat_id: int, prompt_text: str, context: ContextTypes.DEFAULT_TYPE):
+    """دالة مساعدة لمعالجة توليد الصورة وإرسالها"""
+    await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+
+    try:
+        translated_prompt = GoogleTranslator(source="auto", target="en").translate(prompt_text)
+        logger.info(f"Original: {prompt_text} -> Translated: {translated_prompt}")
+    except Exception as e:
+        logger.error(f"Translation error: {e}")
+        translated_prompt = prompt_text
+
+    encoded_prompt = urllib.parse.quote(translated_prompt)
+    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+
+    try:
+        resp = requests.get(image_url, timeout=60)
+        resp.raise_for_status()
+        caption_text = f"🎨 الوصف: {prompt_text}\n🔤 الترجمة: {translated_prompt}"
+        await context.bot.send_photo(chat_id=chat_id, photo=resp.content, caption=caption_text)
+    except Exception as e:
+        logger.error(f"Image generation error: {e}")
+        await context.bot.send_message(chat_id=chat_id, text="ما قدرت أولد الصورة، جرب كمان مرة 🙏")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -77,8 +112,20 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    user_text = update.message.text
+    user_text = update.message.text.strip()
 
+    # فحص ما إذا كانت الرسالة تبدأ بكلمات طلب تصميم أو رسم صورة
+    match = re.match(IMAGE_KEYWORDS_PATTERN, user_text, re.IGNORECASE)
+    if match:
+        extracted_prompt = user_text[match.end():].strip(" :,-")
+        if extracted_prompt:
+            await send_generated_image(chat_id, extracted_prompt, context)
+            return
+        else:
+            await update.message.reply_text("حدد وصف الصورة بعد طلبك، مثلاً:\nارسم لي قطة في الفضاء")
+            return
+
+    # إذا لم تكن طلباً لتوليد صورة، تكمل المحادثة الذكية عبر Groq
     history = user_histories.setdefault(chat_id, [])
     history.append({"role": "user", "content": user_text})
     history = history[-MAX_HISTORY_MESSAGES:]
@@ -86,7 +133,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     try:
-        # إرسال تعليمات النظام مع سجل المحادثة دائماً
         messages_to_send = [SYSTEM_PROMPT] + history
 
         response = client.chat.completions.create(
@@ -113,29 +159,7 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id, action="upload_photo"
-    )
-
-    # ترجمة الوصف العربي تلقائياً إلى الإنجليزية عبر Google Translate
-    try:
-        translated_prompt = GoogleTranslator(source="auto", target="en").translate(user_prompt)
-        logger.info(f"Original prompt: {user_prompt} -> Translated: {translated_prompt}")
-    except Exception as e:
-        logger.error(f"Translation error: {e}")
-        translated_prompt = user_prompt
-
-    encoded_prompt = urllib.parse.quote(translated_prompt)
-    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-
-    try:
-        resp = requests.get(image_url, timeout=60)
-        resp.raise_for_status()
-        caption_text = f"🎨 الوصف: {user_prompt}\n🔤 الترجمة: {translated_prompt}"
-        await update.message.reply_photo(photo=resp.content, caption=caption_text)
-    except Exception as e:
-        logger.error(f"Image generation error: {e}")
-        await update.message.reply_text("ما قدرت أولد الصورة، جرب كمان مرة 🙏")
+    await send_generated_image(update.effective_chat.id, user_prompt, context)
 
 
 def main():
